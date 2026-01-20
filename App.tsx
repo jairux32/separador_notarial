@@ -8,28 +8,30 @@ const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.LANDING);
 
   return (
-    <div className="min-h-screen flex flex-col font-sans">
-      {/* Navbar */}
-      <nav className="bg-white border-b border-gray-200 sticky top-0 z-50">
+    <div className="min-h-screen flex flex-col font-sans text-slate-900 bg-transparent">
+      {/* Glass Navbar */}
+      <nav className="sticky top-0 z-50 backdrop-blur-md bg-white/70 border-b border-white/50 shadow-sm transition-all duration-300">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-          <div className="flex h-16 justify-between">
-            <div className="flex items-center cursor-pointer" onClick={() => setAppState(AppState.LANDING)}>
-              <div className="flex-shrink-0 flex items-center gap-2">
-                <div className="bg-esprint-600 p-1.5 rounded-lg">
-                    <Scissors className="h-6 w-6 text-white" />
+          <div className="flex h-16 justify-between items-center">
+            <div className="flex items-center cursor-pointer group" onClick={() => setAppState(AppState.LANDING)}>
+              <div className="flex-shrink-0 flex items-center gap-3">
+                <div className="bg-gradient-to-br from-esprint-500 to-esprint-700 p-2 rounded-xl shadow-lg shadow-esprint-500/20 group-hover:scale-105 transition-transform duration-300">
+                  <Scissors className="h-6 w-6 text-white" />
                 </div>
-                <span className="font-bold text-xl tracking-tight text-gray-900">Esprint<span className="text-esprint-600">Notarial</span></span>
+                <span className="font-bold text-xl tracking-tight text-slate-800">
+                  Esprint<span className="text-transparent bg-clip-text bg-gradient-to-r from-esprint-600 to-esprint-400">Notarial</span>
+                </span>
               </div>
             </div>
             <div className="flex items-center">
-                <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-1 rounded">v2.4 - Res. 202-2021</span>
+              <span className="text-xs font-bold text-esprint-700 bg-esprint-100/80 px-3 py-1.5 rounded-full border border-esprint-200">v3.0 - Res. 202-2021</span>
             </div>
           </div>
         </div>
       </nav>
 
       {/* Main Content */}
-      <main className="flex-grow">
+      <main className="flex-grow flex flex-col items-center justify-center p-4">
         {appState === AppState.LANDING ? (
           <Hero onStart={() => setAppState(AppState.DASHBOARD)} />
         ) : (
@@ -37,16 +39,12 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Footer */}
-      <footer className="bg-white border-t border-gray-200">
-        <div className="mx-auto max-w-7xl px-6 py-12 md:flex md:items-center md:justify-between lg:px-8">
-          <div className="mt-8 md:order-1 md:mt-0">
-            <p className="text-center text-xs leading-5 text-gray-500">
-              &copy; 2024 Esprint Soluciones Tecnológicas. Todos los derechos reservados.
-              <br/>
-              Cumpliendo con las normativas del Consejo de la Judicatura del Ecuador.
-            </p>
-          </div>
+      {/* Glass Footer */}
+      <footer className="mt-auto backdrop-blur-sm bg-white/40 border-t border-white/20">
+        <div className="mx-auto max-w-7xl px-6 py-8 md:flex md:items-center md:justify-center lg:px-8">
+          <p className="text-center text-xs font-medium text-slate-500">
+            &copy; 2024 Esprint Soluciones Tecnológicas. <span className="text-esprint-600">Innovación Legal.</span>
+          </p>
         </div>
       </footer>
     </div>

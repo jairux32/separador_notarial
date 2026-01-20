@@ -20,21 +20,22 @@ export const splitAndZipPDF = async (
   onProgress: (percent: number) => void
 ): Promise<Blob> => {
   const arrayBuffer = await originalFile.arrayBuffer();
-  const originalPdf = await PDFDocument.load(arrayBuffer);
+  // Add ignoreEncryption: true to prevent errors with passwordless encrypted files
+  const originalPdf = await PDFDocument.load(arrayBuffer, { ignoreEncryption: true });
   const zip = new JSZip();
   const totalActs = acts.length;
 
   for (let i = 0; i < totalActs; i++) {
     const act = acts[i];
-    
+
     // Create a new PDF document
     const newPdf = await PDFDocument.create();
-    
+
     // Calculate page indices (0-based)
     // Validate range
     const start = Math.max(0, act.startPage - 1);
     const end = Math.min(originalPdf.getPageCount() - 1, act.endPage - 1);
-    
+
     if (start > end) continue;
 
     const pageIndices = [];
@@ -48,9 +49,10 @@ export const splitAndZipPDF = async (
 
     // Save the new PDF
     const pdfBytes = await newPdf.save();
-    
+
     // Sanitize filename
-    const safeName = act.code.replace(/[^a-z0-9]/gi, '_').toUpperCase();
+    const sanitizedCode = act.code.replace(/[^a-z0-9]/gi, '_').toUpperCase() || 'SIN_CODIGO';
+    const safeName = `${i + 1}_${sanitizedCode}`; // Prefix with index to guarantee uniqueness
     zip.file(`${safeName}.pdf`, pdfBytes);
 
     // Update progress

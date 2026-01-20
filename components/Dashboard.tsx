@@ -3,26 +3,17 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Upload, File as FileIcon, Loader2, Plus, Trash2, Wand2, Download, Search, FileDigit, AlertCircle, AlertTriangle, Eye, EyeOff, Info, Calendar, Scan, Sparkles, RefreshCw, X, ChevronLeft, ChevronRight, Maximize2, CheckCircle2 } from 'lucide-react';
 import { NotarialAct, ProcessedFile } from '../types';
 import { getPDFPageCount, splitAndZipPDF } from '../services/pdfService';
-import { analyzeNotarialText, discoverActsInText } from '../services/geminiService';
-import { performOCR, OCRError } from '../services/ocrService';
+// import { analyzeNotarialText, discoverActsInText } from '../services/groqService'; // Removed for local-only mode
+import { performOCR, OCRError, loadPDFForOCR } from '../services/ocrService';
 import * as pdfjsLib from 'pdfjs-dist';
 import clsx from 'clsx';
 
-const WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// Worker setup is handled in ocrService.ts
 
-if (typeof window !== 'undefined') {
-  const pdfjs = (pdfjsLib as any);
-  if (pdfjs.GlobalWorkerOptions) {
-    pdfjs.GlobalWorkerOptions.workerSrc = WORKER_URL;
-  } else if ((window as any).pdfjsLib?.GlobalWorkerOptions) {
-    (window as any).pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_URL;
-  }
-}
-
-const PreviewModal: React.FC<{ 
-  file: File, 
-  act: NotarialAct, 
-  onClose: () => void 
+const PreviewModal: React.FC<{
+  file: File,
+  act: NotarialAct,
+  onClose: () => void
 }> = ({ file, act, onClose }) => {
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -35,17 +26,17 @@ const PreviewModal: React.FC<{
       try {
         const getDocument = (pdfjsLib as any).getDocument || (window as any).pdfjsLib?.getDocument;
         if (!getDocument) return;
-        
+
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await getDocument({ data: arrayBuffer }).promise;
         const page = await pdf.getPage(currentPage);
-        
+
         const viewport = page.getViewport({ scale: 1.5 });
         const canvas = document.createElement('canvas');
         const context = canvas.getContext('2d');
         canvas.height = viewport.height;
         canvas.width = viewport.width;
-        
+
         if (context) {
           await page.render({ canvasContext: context, viewport }).promise;
           if (isMounted) setImageUrl(canvas.toDataURL('image/jpeg', 0.85));
@@ -68,7 +59,7 @@ const PreviewModal: React.FC<{
         <div className="p-4 border-b flex justify-between items-center bg-gray-50">
           <div>
             <h3 className="font-bold text-gray-900 flex items-center gap-2">
-              <Eye className="w-4 h-4 text-esprint-600"/>
+              <Eye className="w-4 h-4 text-esprint-600" />
               Vista Previa: {act.code || 'Acto sin código'}
             </h3>
             <p className="text-xs text-gray-500">Mostrando foja {currentPage} de {act.endPage}</p>
@@ -77,7 +68,7 @@ const PreviewModal: React.FC<{
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
-        
+
         <div className="flex-grow overflow-auto p-6 flex items-center justify-center bg-gray-100 relative group">
           {loading ? (
             <div className="flex flex-col items-center gap-2">
@@ -92,14 +83,14 @@ const PreviewModal: React.FC<{
 
           {totalActPages > 1 && (
             <>
-              <button 
+              <button
                 disabled={currentPage <= act.startPage}
                 onClick={() => setCurrentPage(p => p - 1)}
                 className="absolute left-4 top-1/2 -translate-y-1/2 p-3 bg-white/80 hover:bg-white shadow-md rounded-full disabled:opacity-30 disabled:cursor-not-allowed transition-all"
               >
                 <ChevronLeft className="w-6 h-6 text-gray-700" />
               </button>
-              <button 
+              <button
                 disabled={currentPage >= act.endPage}
                 onClick={() => setCurrentPage(p => p + 1)}
                 className="absolute right-4 top-1/2 -translate-y-1/2 p-3 bg-white/80 hover:bg-white shadow-md rounded-full disabled:opacity-30 disabled:cursor-not-allowed transition-all"
@@ -137,12 +128,21 @@ export const Dashboard: React.FC = () => {
   const [previewingAct, setPreviewingAct] = useState<NotarialAct | null>(null);
   const [analyzingActId, setAnalyzingActId] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
-  const [ocrErrors, setOcrErrors] = useState<{page: number, message: string, retrying?: boolean}[]>([]);
+  const [ocrErrors, setOcrErrors] = useState<{ page: number, message: string, retrying?: boolean }[]>([]);
   const [fullCleanedText, setFullCleanedText] = useState<string>("");
+  const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString());
+  const [selectedType, setSelectedType] = useState<string>("P");
+
+  const actTypes = [
+    { value: "P", label: "P - PROTOCOLOS" },
+    { value: "D", label: "D - DILIGENCIAS" },
+    { value: "O", label: "O - OTROS" },
+    { value: "A", label: "A - ARRIENDOS" }
+  ];
 
   const validateActCode = (code: string) => {
     if (!code) return true;
-    return /^\d{4}\d{7}[P|D|A|O|C]\d{5}$/i.test(code);
+    return /^\d{4}\d{7}[P|D|O|A]\d{5}$/i.test(code);
   };
 
   const cleanOcrText = (text: string): string => {
@@ -153,11 +153,53 @@ export const Dashboard: React.FC = () => {
       .trim();
   };
 
-  // Fallback local regex para encontrar códigos si la IA falla
+  // Lógica de Reconocimiento Local Avanzada (Sin IA)
+  // Lógica de Reconocimiento Local Avanzada (Guiada por Usuario)
   const findCodesLocally = (text: string) => {
-    const regex = /\b(20\d{2})(\d{7})([A-Z])(\d{5})\b/g;
+    // Matriz de confusión para el año seleccionado
+    const yearPattern = selectedYear.split('').map(d => {
+      if (d === '0') return '[0|O|o|D|Q]';
+      if (d === '1') return '[1|I|l|!]';
+      if (d === '2') return '[2|Z]';
+      if (d === '8') return '[8|B]';
+      return d;
+    }).join('');
+
+    // Matriz de confusión para el código notarial constante: 1101007
+    // 1->[1|I|l|!|\|], 0->[0|O|o|D|Q], 7->[7|T]
+    // Patrón flexible para 1101007:
+    const notaryPattern = `[1Il!|][1Il!|][0OoDQ][1Il!|][0OoDQ][0OoDQ][7T]`;
+
+    // Matriz de confusión para la letra seleccionada
+    const charMap: Record<string, string> = {
+      'P': '[P]', 'D': '[D|0|O]', 'O': '[O|0|D]', 'C': '[C|G]', 'A': '[A|4]'
+    };
+    const typePattern = charMap[selectedType] || `[${selectedType}]`;
+
+    // Regex Dinámico: Año(Selected) - Notaria(Fixed 1101007) - Letra(Selected) - Secuencia(5d)
+    const regexStr = `(${yearPattern})\\s*(${notaryPattern})\\s*(${typePattern})\\s*([0-9OQZDBIil|!]{5})`;
+
+    // Fallback: Si no encuentra el patrón estricto 1101007, busca genérico para no romper todo
+    // Pero el usuario dijo "siempre va ser 1101007", así que priorizamos esto.
+    const regex = new RegExp(regexStr, 'gi');
+
     const matches = [...text.matchAll(regex)];
-    return matches.map(m => m[0]);
+    return matches.map(m => {
+      const year = selectedYear;
+
+      // Forzamos la constante 1101007 ya que el usuario indicó que es fija
+      const notary = "1101007";
+
+      const letter = selectedType;
+
+      let sequence = m[4]
+        .replace(/[OQD]/gi, '0')
+        .replace(/Z/gi, '2')
+        .replace(/B/gi, '8')
+        .replace(/[l|I|i|!]/g, '1');
+
+      return `${year}${notary}${letter}${sequence}`;
+    });
   };
 
   const checkOverlap = (actId: string, start: number, end: number) => {
@@ -172,6 +214,11 @@ export const Dashboard: React.FC = () => {
     if (e.target.files?.[0]) await processFile(e.target.files[0]);
   };
 
+  /* PDF Processing State */
+  const pdfDocumentRef = React.useRef<any>(null); // Store loaded PDF.js document
+
+  // import { loadPDFForOCR } from '../services/ocrService'; // Add this to imports at top manually if needed, or assume auto-import
+
   const processFile = async (file: File) => {
     if (file.type !== 'application/pdf') {
       setError("Solo archivos PDF.");
@@ -182,7 +229,28 @@ export const Dashboard: React.FC = () => {
       setError(null);
       setOcrErrors([]);
       setFullCleanedText("");
-      const pages = await getPDFPageCount(file);
+
+      // Load PDF for OCR once here
+      if (pdfDocumentRef.current) {
+        // cleanup? pdfjs docs usually just garbage collect, but we can reset
+        pdfDocumentRef.current = null;
+      }
+      // Assuming performOCR needs the doc, we need to load it.
+      // But we can't import loadPDFForOCR easily if I don't see imports. 
+      // I will add the import in a separate step or assume I can modify it.
+      // Ideally I should have checked imports first.
+
+      // Since I am modifying the function body, I will rely on the fact that I will add the import next.
+      // For now, let's keep the logic sound.
+
+      // We will perform the load inside autoDiscover acts? No, better here to fail fast if file is bad.
+      // However, to keep it simple with existing imports, I need to make sure `loadPDFForOCR` is available.
+
+      // Let's assume I will fix imports.
+      const loadedDoc = await loadPDFForOCR(file);
+      pdfDocumentRef.current = loadedDoc;
+      const pages = loadedDoc.numPages; // Use the count from the loaded doc directly! Faster than getPDFPageCount
+
       setCurrentFile({
         id: crypto.randomUUID(),
         file,
@@ -192,95 +260,81 @@ export const Dashboard: React.FC = () => {
         acts: []
       });
     } catch (err) {
-      setError("Error al cargar el PDF.");
+      console.error(err);
+      setError("Error al cargar el PDF. El archivo podría estar dañado o bloqueado.");
     } finally {
       setIsProcessing(false);
     }
   };
 
   const autoDiscoverActs = async () => {
-    if (!currentFile) return;
+    if (!currentFile || !pdfDocumentRef.current) return;
     setIsScanning(true);
     setOcrErrors([]);
     try {
       let combinedText = "";
       const totalPages = currentFile.pageCount;
-      
-      // ESTRATEGIA MEJORADA: 
-      // 1. Escanear las primeras 3 páginas (casi siempre hay un acto al inicio).
-      // 2. Luego saltar con un paso calculado.
-      const pagesToScan = new Set<number>();
-      for (let i = 1; i <= Math.min(3, totalPages); i++) pagesToScan.add(i);
-      
-      const step = Math.max(5, Math.floor(totalPages / 15));
-      for (let i = 4; i <= totalPages; i += step) pagesToScan.add(i);
-      
-      const pagesArray = Array.from(pagesToScan).sort((a,b) => a-b);
-      let scannedCount = 0;
+      const pagesArray = Array.from({ length: totalPages }, (_, i) => i + 1);
+      const CHUNK_SIZE = 5;
 
-      for (const p of pagesArray) {
-        scannedCount++;
-        setProgress(Math.round((scannedCount / pagesArray.length) * 100));
-        
-        try {
-          const text = await performOCR(currentFile.file, p);
-          const cleaned = cleanOcrText(text);
-          combinedText += `\n--- FOJA ${p} ---\n${cleaned}`;
-        } catch (ocrErr) {
-          const msg = ocrErr instanceof OCRError ? ocrErr.message : "Error OCR.";
-          setOcrErrors(prev => [...prev, { page: p, message: msg }]);
+      let allFoundCodes: Set<string> = new Set();
+      let candidates: { code: string, page: number }[] = [];
+
+      for (let i = 0; i < pagesArray.length; i += CHUNK_SIZE) {
+        const chunk = pagesArray.slice(i, i + CHUNK_SIZE);
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        for (const p of chunk) {
+          setProgress(Math.round(((i + 1) / totalPages) * 100));
+
+          try {
+            // PASS THE REF, NOT THE FILE
+            const text = await performOCR(pdfDocumentRef.current, p);
+            const cleaned = cleanOcrText(text);
+
+            const codesOnPage = findCodesLocally(cleaned);
+
+            codesOnPage.forEach(code => {
+              if (!allFoundCodes.has(code)) {
+                allFoundCodes.add(code);
+                candidates.push({ code, page: p });
+              }
+            });
+
+          } catch (ocrErr) {
+            const msg = ocrErr instanceof OCRError ? ocrErr.message : "Error OCR.";
+            setOcrErrors(prev => [...prev, { page: p, message: msg }]);
+          }
         }
       }
 
-      setFullCleanedText(combinedText);
-      
-      // Paso 1: Intentar con Gemini
-      let suggestions = await discoverActsInText(combinedText);
-      
-      // Paso 2: Fallback local si Gemini no encontró nada
-      if (!suggestions || suggestions.length === 0) {
-        console.log("Gemini no encontró actos, intentando búsqueda local...");
-        const localCodes = findCodesLocally(combinedText);
-        if (localCodes.length > 0) {
-          suggestions = localCodes.map(code => ({
-            code: code,
-            type: "Acto Detectado (Local)",
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.page - b.page);
+
+        const discoveredActs = candidates.map((c, i) => {
+          const nextPage = candidates[i + 1]?.page || totalPages + 1;
+          const endPage = Math.max(c.page, nextPage - 1);
+
+          return {
+            id: crypto.randomUUID(),
+            startPage: c.page,
+            endPage: Math.min(endPage, totalPages),
+            code: c.code,
+            description: "Acto Detectado (Local)",
             grantors: "",
-            date: ""
-          }));
-        }
-      }
+            actDate: "",
+            suggestedByAI: false
+          };
+        });
 
-      // Eliminar duplicados basados en código
-      const uniqueSuggestions = suggestions.reduce((acc: any[], current: any) => {
-        const x = acc.find(item => item.code === current.code);
-        if (!x) {
-          return acc.concat([current]);
-        } else {
-          return acc;
-        }
-      }, []);
-      
-      if (uniqueSuggestions.length > 0) {
-        const avgPagesPerAct = Math.floor(totalPages / uniqueSuggestions.length);
-        const discoveredActs = uniqueSuggestions.map((s: any, i: number) => ({
-          id: crypto.randomUUID(),
-          startPage: (i * avgPagesPerAct) + 1,
-          endPage: (i === uniqueSuggestions.length - 1) ? totalPages : (i + 1) * avgPagesPerAct,
-          code: (s.code || "").toUpperCase(),
-          description: s.type || "Acto Detectado",
-          grantors: s.grantors || "",
-          actDate: s.date || "",
-          suggestedByAI: true
-        }));
         setCurrentFile({ ...currentFile, acts: discoveredActs });
       } else {
-        alert("No se identificaron códigos. Intente: 1) Reintentar fojas con error, 2) Verificar que el PDF sea legible, o 3) Añadir manualmente.");
+        alert("No se identificaron códigos. Intente cambiar el Año/Tipo o revise el PDF.");
       }
 
     } catch (e) {
       console.error("Discovery failed:", e);
-      alert("Ocurrió un error en el proceso de escaneo.");
+      alert("Error crítico durante el escaneo local.");
     } finally {
       setIsScanning(false);
       setProgress(0);
@@ -288,37 +342,43 @@ export const Dashboard: React.FC = () => {
   };
 
   const retryOcrPage = async (page: number) => {
-    if (!currentFile) return;
+    if (!currentFile || !pdfDocumentRef.current) return;
     setOcrErrors(prev => prev.map(err => err.page === page ? { ...err, retrying: true } : err));
-    
+
     try {
-      const text = await performOCR(currentFile.file, page);
+      const text = await performOCR(pdfDocumentRef.current, page);
       const cleaned = cleanOcrText(text);
       const newCombinedText = fullCleanedText + `\n--- FOJA ${page} (Retry) ---\n${cleaned}`;
       setFullCleanedText(newCombinedText);
       setOcrErrors(prev => prev.filter(err => err.page !== page));
-      
-      // Re-analizar todo el texto combinado con el nuevo fragmento
-      const suggestions = await discoverActsInText(newCombinedText);
-      
+
+      const localFound = findCodesLocally(newCombinedText);
+      const suggestions = localFound.map((code: string) => ({
+        code: code,
+        type: "Acto Recuperado (Local)",
+        grantors: "",
+        date: ""
+      }));
+
       if (suggestions && suggestions.length > 0) {
-          const currentCodes = currentFile.acts.map(a => a.code);
-          const newActs = suggestions
-            .filter((s:any) => s.code && !currentCodes.includes(s.code.toUpperCase()))
-            .map((s:any) => ({
-                id: crypto.randomUUID(),
-                startPage: page,
-                endPage: Math.min(page + 5, currentFile.pageCount),
-                code: s.code.toUpperCase(),
-                description: s.type || "Acto Recuperado",
-                grantors: s.grantors || "",
-                actDate: s.date || "",
-                suggestedByAI: true
-            }));
-          
-          if (newActs.length > 0) {
-              setCurrentFile({ ...currentFile, acts: [...currentFile.acts, ...newActs].sort((a,b) => a.startPage - b.startPage) });
-          }
+        // ... (Merge logic remains same)
+        const currentCodes = currentFile.acts.map(a => a.code);
+        const newActs = suggestions
+          .filter((s: any) => s.code && !currentCodes.includes(s.code.toUpperCase()))
+          .map((s: any) => ({
+            id: crypto.randomUUID(),
+            startPage: page,
+            endPage: Math.min(page + 5, currentFile.pageCount),
+            code: s.code.toUpperCase(),
+            description: s.type || "Acto Recuperado",
+            grantors: s.grantors || "",
+            actDate: s.date || "",
+            suggestedByAI: true
+          }));
+
+        if (newActs.length > 0) {
+          setCurrentFile({ ...currentFile, acts: [...currentFile.acts, ...newActs].sort((a, b) => a.startPage - b.startPage) });
+        }
       }
     } catch (e) {
       setOcrErrors(prev => prev.map(err => err.page === page ? { ...err, retrying: false, message: "Falló nuevamente." } : err));
@@ -352,28 +412,18 @@ export const Dashboard: React.FC = () => {
     if (currentFile) setCurrentFile({ ...currentFile, acts: currentFile.acts.filter(a => a.id !== id) });
   };
 
-  const runOCRAndAnalysis = async (act: NotarialAct) => {
-    if (!currentFile) return;
-    setAnalyzingActId(act.id);
-    try {
-      const rawText = await performOCR(currentFile.file, act.startPage);
-      const cleanedText = cleanOcrText(rawText);
-      const analysis = await analyzeNotarialText(cleanedText);
-      updateAct(act.id, 'code', (analysis.code || '').toUpperCase());
-      updateAct(act.id, 'description', analysis.type);
-      updateAct(act.id, 'grantors', analysis.grantors);
-      updateAct(act.id, 'actDate', analysis.date);
-      updateAct(act.id, 'suggestedByAI', true);
-    } catch (e) {
-      const msg = e instanceof OCRError ? e.message : "Error al procesar la foja.";
-      alert(`Error en foja ${act.startPage}: ${msg}`);
-    } finally {
-      setAnalyzingActId(null);
-    }
-  };
+  // Function runOCRAndAnalysis removed as it depended on AI service. 
+  // Manual entry or auto-scan is preferred.
 
   const handleDownload = async () => {
-    if (!currentFile || hasAnyOverlap || hasInvalidCodes) return alert("Corrija los errores antes de continuar.");
+    // Solo bloqueamos si hay superposición crítica. 
+    // Los códigos inválidos o errores OCR ahora son permitidos (bajo riesgo del usuario).
+    if (!currentFile || hasAnyOverlap) return alert("Existe una superposición de fojas crítica. Por favor corrija los rangos de páginas.");
+
+    if (hasInvalidCodes || ocrErrors.length > 0) {
+      const confirm = window.confirm("Existen códigos incompletos o fojas con advertencias.\n\n¿Desea generar el ZIP de todas formas con la información disponible?");
+      if (!confirm) return;
+    }
     setIsProcessing(true);
     setProgress(0);
     try {
@@ -400,11 +450,52 @@ export const Dashboard: React.FC = () => {
 
   if (!currentFile) {
     return (
-      <div className="max-w-4xl mx-auto px-6 py-20">
-        <div 
+      <div className="max-w-4xl mx-auto px-6 py-10 w-full animate-fade-in-up">
+
+        {/* Floating Toolbar for Settings */}
+        <div className="glass-panel p-4 rounded-2xl mb-8 flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3 text-slate-700">
+            <div className="p-2 bg-esprint-100 rounded-lg text-esprint-600">
+              <Calendar className="w-5 h-5" />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Configuración</span>
+              <span className="font-bold text-sm">Parámetros de Lectura</span>
+            </div>
+          </div>
+
+          <div className="flex gap-3 w-full md:w-auto">
+            <div className="flex flex-col w-full md:w-32">
+              <label className="text-[10px] font-bold text-slate-400 mb-1 ml-1">AÑO</label>
+              <select
+                value={selectedYear}
+                onChange={(e) => setSelectedYear(e.target.value)}
+                className="glass-input w-full p-2.5 rounded-xl font-bold text-slate-700 outline-none cursor-pointer"
+              >
+                {Array.from({ length: 17 }, (_, i) => 2014 + i).map(y => (
+                  <option key={y} value={y}>{y}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex flex-col w-full md:w-48">
+              <label className="text-[10px] font-bold text-slate-400 mb-1 ml-1">TIPO DE ACTO</label>
+              <select
+                value={selectedType}
+                onChange={(e) => setSelectedType(e.target.value)}
+                className="glass-input w-full p-2.5 rounded-xl font-bold text-slate-700 outline-none cursor-pointer"
+              >
+                {actTypes.map(t => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div
           className={clsx(
-            "flex flex-col items-center justify-center border-4 border-dashed rounded-3xl p-20 transition-all", 
-            isDragging ? "border-esprint-500 bg-esprint-50" : "border-gray-200 hover:border-gray-300",
+            "relative group flex flex-col items-center justify-center border-4 border-dashed rounded-[2.5rem] p-16 transition-all duration-300",
+            isDragging ? "border-esprint-500 bg-esprint-50/50 scale-[1.02]" : "border-slate-200 hover:border-esprint-300 bg-white/40 hover:bg-white/60",
             isProcessing && "opacity-50 pointer-events-none"
           )}
           onDragOver={(e) => { e.preventDefault(); if (!isProcessing) setIsDragging(true); }}
@@ -412,26 +503,44 @@ export const Dashboard: React.FC = () => {
           onDrop={async (e) => { e.preventDefault(); setIsDragging(false); if (!isProcessing && e.dataTransfer.files[0]) await processFile(e.dataTransfer.files[0]); }}
         >
           {isProcessing ? (
-            <div className="flex flex-col items-center gap-4">
-              <Loader2 className="w-16 h-16 text-esprint-600 animate-spin" />
+            <div className="flex flex-col items-center gap-6">
+              <div className="relative">
+                <div className="absolute inset-0 bg-esprint-500 blur-xl opacity-20 animate-pulse"></div>
+                <Loader2 className="relative w-20 h-20 text-esprint-600 animate-spin" />
+              </div>
               <div className="text-center">
-                <h2 className="text-2xl font-bold text-gray-900 mb-1">Cargando PDF...</h2>
-                <p className="text-gray-500">Analizando estructura del documento.</p>
+                <h2 className="text-2xl font-bold text-slate-800 mb-2">Procesando Documento...</h2>
+                <p className="text-slate-500 font-medium">Analizando estructura y cargando en memoria segura.</p>
               </div>
             </div>
           ) : (
             <>
-              <div className="bg-esprint-100 p-6 rounded-full mb-6"><Upload className="w-12 h-12 text-esprint-600" /></div>
-              <h2 className="text-2xl font-bold text-gray-900 mb-2 text-center">Cargar Libro PDF</h2>
-              <p className="text-gray-500 mb-8 text-center max-w-sm">Arrastre el archivo digitalizado para iniciar el reconocimiento automático.</p>
-              <label className="cursor-pointer bg-esprint-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-esprint-700 transition-all shadow-lg shadow-esprint-200">
-                Seleccionar Archivo
+              <div className="bg-gradient-to-br from-esprint-100 to-white p-8 rounded-full mb-8 shadow-xl shadow-esprint-100 group-hover:scale-110 transition-transform duration-300">
+                <Upload className="w-16 h-16 text-esprint-600" />
+              </div>
+              <h2 className="text-3xl font-extrabold text-slate-800 mb-3 text-center">Cargar Libro Notarial</h2>
+              <p className="text-slate-500 mb-10 text-center max-w-md text-lg">
+                Arrastre su PDF aquí o presione el botón para comenzar el análisis local.
+              </p>
+
+              <label className="relative cursor-pointer group overflow-hidden bg-gradient-to-r from-esprint-600 to-esprint-500 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-esprint-500/30 hover:shadow-esprint-500/50 hover:-translate-y-1 transition-all">
+                <span className="relative z-10 flex items-center gap-2">
+                  <FileIcon className="w-5 h-5" /> Seleccionar Archivo
+                </span>
+                <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
                 <input type="file" className="sr-only" onChange={handleFileSelect} disabled={isProcessing} />
               </label>
             </>
           )}
         </div>
-        {error && <p className="mt-4 text-center text-red-600 font-medium">{error}</p>}
+        {error && (
+          <div className="mt-6 flex justify-center animate-fade-in-up">
+            <div className="bg-red-50 border border-red-200 text-red-600 px-6 py-3 rounded-2xl font-bold flex items-center gap-3 shadow-sm">
+              <AlertCircle className="w-5 h-5" />
+              {error}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -439,91 +548,121 @@ export const Dashboard: React.FC = () => {
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
       {previewingAct && (
-        <PreviewModal 
-          file={currentFile.file} 
-          act={previewingAct} 
-          onClose={() => setPreviewingAct(null)} 
+        <PreviewModal
+          file={currentFile.file}
+          act={previewingAct}
+          onClose={() => setPreviewingAct(null)}
         />
       )}
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-8 sticky top-20 z-40">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
-            <div className="p-3 bg-red-50 rounded-xl"><FileIcon className="w-6 h-6 text-red-600" /></div>
-            <div>
-              <h3 className="font-bold text-gray-900">{currentFile.name}</h3>
-              <p className="text-xs text-gray-500">{currentFile.pageCount} fojas totales</p>
+      {error && (
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 bg-red-100 border border-red-400 text-red-700 px-6 py-3 rounded-xl shadow-xl font-bold flex items-center gap-3 animate-in fade-in slide-in-from-top-5">
+          <AlertCircle className="w-6 h-6" />
+          {error}
+          <button onClick={() => setError(null)} className="ml-4 p-1 hover:bg-red-200 rounded-full"><X className="w-5 h-5" /></button>
+        </div>
+      )}
+
+      <div className="glass-panel rounded-[2rem] p-6 mb-8 sticky top-20 z-40 flex flex-col md:flex-row md:items-center justify-between gap-6">
+        <div className="flex items-center gap-5">
+          <div className="p-4 bg-gradient-to-br from-red-50 to-red-100 rounded-2xl shadow-inner border border-red-100">
+            <FileIcon className="w-8 h-8 text-red-600" />
+          </div>
+          <div>
+            <h3 className="font-extrabold text-xl text-slate-800">{currentFile.name}</h3>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-600 text-xs font-bold border border-slate-200">
+                {currentFile.pageCount} fojas
+              </span>
+              <span className="text-slate-400 text-xs">•</span>
+              <span className="text-xs text-slate-500 font-medium">Lectura en memoria</span>
             </div>
           </div>
-          <div className="flex gap-3">
-            <button 
-              onClick={autoDiscoverActs} 
-              disabled={isScanning || isProcessing}
-              className="flex items-center gap-2 px-5 py-2.5 bg-esprint-50 text-esprint-700 rounded-xl text-sm font-bold border border-esprint-200 hover:bg-esprint-100 transition-all disabled:opacity-50"
-            >
-              {isScanning ? <><Loader2 className="w-4 h-4 animate-spin"/> {progress}%</> : <><Sparkles className="w-4 h-4"/> Escaneo Inteligente</>}
-            </button>
-            <button 
-              onClick={handleDownload} 
-              disabled={isProcessing || isScanning || currentFile.acts.length === 0 || hasAnyOverlap || hasInvalidCodes}
-              className="flex items-center gap-2 px-6 py-2.5 bg-esprint-600 text-white rounded-xl text-sm font-bold shadow-md hover:bg-esprint-700 disabled:bg-gray-300 transition-all"
-            >
-              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin"/> : <Download className="w-4 h-4"/>} Generar ZIP
-            </button>
-          </div>
         </div>
-        
-        {ocrErrors.length > 0 && (
-          <div className="mt-4 p-5 bg-orange-50 border border-orange-200 rounded-2xl shadow-sm">
-             <div className="flex items-center justify-between mb-4">
-               <div className="flex items-center gap-2 text-orange-800 font-bold text-sm">
-                  <AlertCircle className="w-5 h-5"/> 
-                  Diagnóstico de Lectura: {ocrErrors.length} fojas con advertencias
-               </div>
-               <span className="text-[10px] bg-orange-200 text-orange-800 px-2 py-0.5 rounded-full font-bold uppercase">Acción Requerida</span>
-             </div>
-             
-             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-48 overflow-y-auto pr-2 scrollbar-thin">
-                {ocrErrors.map((err, i) => (
-                  <div key={i} className="bg-white border border-orange-100 p-3 rounded-xl flex items-center justify-between group">
-                    <div className="flex flex-col">
-                      <span className="text-xs font-bold text-gray-700">Foja {err.page}</span>
-                      <span className="text-[10px] text-gray-400 truncate max-w-[120px]">{err.message}</span>
-                    </div>
-                    <button 
-                      onClick={() => retryOcrPage(err.page)}
-                      disabled={err.retrying}
-                      className="p-2 bg-orange-50 text-orange-600 rounded-lg hover:bg-orange-600 hover:text-white transition-all disabled:opacity-50"
-                    >
-                      {err.retrying ? <Loader2 className="w-3.5 h-3.5 animate-spin"/> : <RefreshCw className="w-3.5 h-3.5"/>}
-                    </button>
-                  </div>
-                ))}
-             </div>
-          </div>
-        )}
 
-        {ocrErrors.length === 0 && fullCleanedText && !isScanning && (
-           <div className="mt-4 p-3 bg-green-50 border border-green-100 rounded-xl flex items-center gap-3 animate-in fade-in slide-in-from-top-1">
-              <div className="bg-green-100 p-1.5 rounded-full"><CheckCircle2 className="w-4 h-4 text-green-600"/></div>
-              <p className="text-xs font-medium text-green-700">Lectura inteligente completada.</p>
-           </div>
-        )}
-
-        {(hasAnyOverlap || hasInvalidCodes) && (
-          <p className="mt-4 text-xs text-red-600 font-bold flex items-center gap-2 animate-pulse">
-            <AlertTriangle className="w-4 h-4"/> Corrija los errores de superposición o formato (17 caracteres) antes de exportar.
-          </p>
-        )}
+        <div className="flex gap-3">
+          <button
+            onClick={autoDiscoverActs}
+            disabled={isScanning || isProcessing}
+            className="flex items-center gap-2 px-5 py-3 bg-white hover:bg-esprint-50 text-esprint-700 rounded-xl text-sm font-bold border border-esprint-100 shadow-sm hover:shadow-md transition-all disabled:opacity-50"
+          >
+            {isScanning ? <><Loader2 className="w-4 h-4 animate-spin" /> {progress}%</> : <><Sparkles className="w-4 h-4" /> Escaneo Inteligente</>}
+          </button>
+          <button
+            onClick={handleDownload}
+            disabled={isProcessing || isScanning || currentFile.acts.length === 0 || hasAnyOverlap}
+            className={clsx(
+              "flex items-center gap-2 px-6 py-3 rounded-xl text-sm font-bold shadow-lg shadow-esprint-500/20 transition-all hover:-translate-y-0.5",
+              (hasInvalidCodes || ocrErrors.length > 0) ? "bg-gradient-to-r from-orange-400 to-orange-500 hover:from-orange-500 hover:to-orange-600 text-white"
+                : "bg-gradient-to-r from-esprint-600 to-esprint-500 hover:from-esprint-500 hover:to-esprint-400 text-white",
+              "disabled:bg-gray-300 disabled:shadow-none disabled:from-gray-300 disabled:to-gray-300 disabled:cursor-not-allowed"
+            )}
+            title={hasInvalidCodes ? "Descargar con advertencias" : "Descargar ZIP"}
+          >
+            {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            {hasInvalidCodes || ocrErrors.length > 0 ? "Generar con Alertas" : "Generar ZIP"}
+          </button>
+        </div>
       </div>
+
+      {/* Error Panel Glass */}
+      {ocrErrors.length > 0 && (
+        <div className="mb-8 glass-panel border-l-4 border-l-orange-500 p-1 rounded-2xl overflow-hidden">
+          <details className="group">
+            <summary className="p-4 flex items-center justify-between cursor-pointer list-none hover:bg-orange-50/50 transition-colors">
+              <div className="flex items-center gap-3 text-orange-800 font-bold text-sm">
+                <div className="bg-orange-100 p-2 rounded-lg"><AlertCircle className="w-5 h-5 text-orange-600" /></div>
+                Diagnóstico: {ocrErrors.length} fojas con advertencias (posibles páginas vacías o sin código)
+              </div>
+              <span className="text-xs text-orange-600 font-bold underline group-open:no-underline bg-white/50 px-3 py-1 rounded-lg">
+                Ver detalles
+              </span>
+            </summary>
+
+            <div className="p-4 bg-orange-50/30 border-t border-orange-100/50 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-60 overflow-y-auto pr-2 scrollbar-thin">
+              {ocrErrors.map((err, i) => (
+                <div key={i} className="bg-white/80 p-3 rounded-xl flex items-center justify-between shadow-sm border border-orange-100">
+                  <div className="flex flex-col">
+                    <span className="text-xs font-bold text-slate-700">Foja {err.page}</span>
+                    <span className="text-[10px] text-slate-400 truncate max-w-[120px]">{err.message}</span>
+                  </div>
+                  <button
+                    onClick={() => retryOcrPage(err.page)}
+                    disabled={err.retrying}
+                    className="p-2 bg-orange-50 text-orange-600 rounded-lg hover:bg-orange-500 hover:text-white transition-all disabled:opacity-50"
+                  >
+                    {err.retrying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </details>
+        </div>
+      )}
+
+      {/* Warning Panels */}
+      {(hasAnyOverlap || hasInvalidCodes) && (
+        <div className="mb-8 flex flex-col gap-3">
+          {hasAnyOverlap && (
+            <div className="glass-panel border-l-4 border-l-red-500 p-4 rounded-xl flex items-center gap-3 text-red-700 font-bold animate-pulse">
+              <AlertTriangle className="w-5 h-5" /> ERROR CRÍTICO: Hay actos con fojas superpuestas. Corrija antes de exportar.
+            </div>
+          )}
+          {hasInvalidCodes && (
+            <div className="glass-panel border-l-4 border-l-orange-400 p-4 rounded-xl flex items-center gap-3 text-orange-700 font-bold">
+              <Info className="w-5 h-5" /> Advertencia: Algunos actos tienen códigos con formato incompleto.
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="space-y-6 mb-20">
         <div className="flex items-center justify-between">
           <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-4 top-3 w-4 h-4 text-gray-400"/>
-            <input 
-              type="text" 
-              placeholder="Buscar por código o descripción..." 
+            <Search className="absolute left-4 top-3 w-4 h-4 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Buscar por código o descripción..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-11 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-esprint-100 outline-none"
@@ -540,56 +679,103 @@ export const Dashboard: React.FC = () => {
         )}
 
         {filteredActs.map((act) => {
-          const isOverlapping = checkOverlap(act.id, act.startPage, act.endPage);
-          const isCodeValid = validateActCode(act.code);
-          
+          const isOverlap = currentFile?.acts.some(other =>
+            other.id !== act.id &&
+            ((act.startPage >= other.startPage && act.startPage <= other.endPage) ||
+              (act.endPage >= other.startPage && act.endPage <= other.endPage)));
+
+          // Check regex format 17 chars
+          const isValidFormat = /^\d{4}\d{7}[A-Z]\d{5}$/.test(act.code);
+
           return (
-            <div key={act.id} className={clsx("bg-white border rounded-2xl shadow-sm overflow-hidden transition-all group/card", (isOverlapping || !isCodeValid) ? "border-red-300 ring-2 ring-red-50" : "border-gray-200 hover:border-esprint-300 hover:shadow-md")}>
-              <div className="p-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
-                <div className="lg:col-span-3 border-r border-gray-100 pr-6 flex flex-col gap-4">
-                  <div>
-                    <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest block mb-2">Fojas (Inicio - Fin)</label>
-                    <div className="flex items-center gap-2 bg-gray-50 p-3 rounded-xl border border-gray-200">
-                      <input type="number" min="1" value={act.startPage} onChange={(e) => updateAct(act.id, 'startPage', parseInt(e.target.value) || 1)} className="w-full bg-transparent text-center font-bold text-gray-900 focus:ring-0 border-0" />
-                      <div className="w-px h-4 bg-gray-300"></div>
-                      <input type="number" min="1" value={act.endPage} onChange={(e) => updateAct(act.id, 'endPage', parseInt(e.target.value) || 1)} className="w-full bg-transparent text-center font-bold text-gray-900 focus:ring-0 border-0" />
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => runOCRAndAnalysis(act)} disabled={analyzingActId === act.id} title="Analizar foja" className="flex-1 bg-esprint-50 text-esprint-700 p-2.5 rounded-xl text-xs font-bold hover:bg-esprint-100 border border-esprint-100 transition-all flex items-center justify-center">
-                      {analyzingActId === act.id ? <Loader2 className="w-4 h-4 animate-spin"/> : <RefreshCw className="w-4 h-4"/>}
-                    </button>
-                    <button onClick={() => setPreviewingAct(act)} title="Ver imagen" className="flex-1 p-2.5 rounded-xl text-xs font-bold border bg-white text-gray-600 border-gray-200 hover:bg-gray-900 hover:text-white transition-all shadow-sm">
-                      <Maximize2 className="w-4 h-4 mx-auto"/>
-                    </button>
-                    <button onClick={() => removeAct(act.id)} title="Eliminar" className="p-2.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all">
-                      <Trash2 className="w-4 h-4"/>
-                    </button>
-                  </div>
+            <div
+              key={act.id}
+              className={clsx(
+                "glass-panel rounded-3xl p-5 relative group transition-all duration-300 hover:shadow-2xl hover:-translate-y-1 ring-1",
+                isOverlap ? "ring-red-300 bg-red-50/50" : isValidFormat ? "ring-white/50 hover:ring-esprint-200" : "ring-orange-200 bg-orange-50/30"
+              )}
+            >
+              {/* Header Card */}
+              <div className="flex justify-between items-start mb-4">
+                <div className="flex items-center gap-2">
+                  <span className={clsx(
+                    "text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-lg border",
+                    act.suggestedByAI ? "bg-esprint-50 text-esprint-700 border-esprint-200" : "bg-slate-100 text-slate-600 border-slate-200"
+                  )}>
+                    {act.suggestedByAI ? "Auto" : "Manual"}
+                  </span>
+                  {!isValidFormat && (
+                    <span className="text-[10px] font-black uppercase tracking-wider px-2 py-1 rounded-lg border bg-orange-50 text-orange-600 border-orange-200 flex items-center gap-1">
+                      Review
+                    </span>
+                  )}
                 </div>
 
-                <div className="lg:col-span-9 grid grid-cols-1 md:grid-cols-6 gap-6">
-                  <div className="md:col-span-3">
-                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-2 block">Código Alfanumérico (17 caracteres)</label>
-                    <input type="text" maxLength={17} value={act.code} onChange={(e) => updateAct(act.id, 'code', e.target.value.toUpperCase())} className={clsx("w-full px-4 py-3 rounded-xl border font-mono tracking-widest text-sm focus:ring-4 transition-all outline-none", !isCodeValid ? "border-red-400 bg-red-50 focus:ring-red-100" : "border-gray-200 focus:ring-esprint-50")} />
-                    {!isCodeValid && act.code.length > 0 && <span className="text-[9px] text-red-500 font-bold mt-1">FORMATO INVÁLIDO</span>}
-                  </div>
-                  <div className="md:col-span-3">
-                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-2 block">Fecha</label>
-                    <div className="relative">
-                      <Calendar className="absolute left-4 top-3 w-4 h-4 text-gray-300" />
-                      <input type="text" value={act.actDate} onChange={(e) => updateAct(act.id, 'actDate', e.target.value)} className="w-full pl-11 pr-4 py-3 border border-gray-200 rounded-xl text-sm focus:ring-4 focus:ring-esprint-50 outline-none" />
-                    </div>
-                  </div>
-                  <div className="md:col-span-6">
-                    <label className="text-[10px] font-bold text-gray-400 uppercase mb-2 block">Tipo de Acto / Partes</label>
-                    <input type="text" value={act.description} onChange={(e) => updateAct(act.id, 'description', e.target.value)} placeholder="Ej: Compraventa..." className="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm mb-3 outline-none focus:ring-4 focus:ring-esprint-50" />
-                    <textarea rows={1} value={act.grantors} onChange={(e) => updateAct(act.id, 'grantors', e.target.value)} placeholder="Nombres de las partes..." className="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm resize-none outline-none focus:ring-4 focus:ring-esprint-50" />
-                  </div>
+                <div className="flex gap-1 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                  <button onClick={() => setPreviewingAct(act)} className="p-2 hover:bg-esprint-100 text-esprint-600 rounded-xl transition-colors" title="Ver PDF">
+                    <Eye className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => removeAct(act.id)} className="p-2 hover:bg-red-100 text-red-500 rounded-xl transition-colors" title="Eliminar">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
+
+              {/* Code Input */}
+              <div className="mb-3">
+                <label className="text-[10px] font-bold text-slate-400 ml-1 mb-1 block">CÓDIGO NOTARIAL</label>
+                <div className="relative">
+                  <FileDigit className="absolute left-3 top-2.5 w-4 h-4 text-slate-400" />
+                  <input
+                    value={act.code}
+                    onChange={(e) => updateAct(act.id, 'code', e.target.value)}
+                    className={clsx(
+                      "w-full pl-10 pr-3 py-2 rounded-xl text-lg font-mono font-bold outline-none border transition-all bg-white/60 focus:bg-white focus:border-esprint-500 focus:ring-4 focus:ring-esprint-500/10",
+                      !isValidFormat && act.code.length > 0 ? "border-orange-300 text-orange-700 focus:ring-orange-200" : "border-slate-200"
+                    )}
+                    placeholder="2024..."
+                  />
+                </div>
+              </div>
+
+              {/* Description Input */}
+              <div className="mb-4">
+                <input
+                  value={act.description}
+                  onChange={(e) => updateAct(act.id, 'description', e.target.value)}
+                  className="w-full bg-transparent border-b border-slate-200 focus:border-esprint-500 py-1 text-sm font-medium text-slate-600 placeholder-slate-400 outline-none transition-colors"
+                  placeholder="Descripción del acto..."
+                />
+              </div>
+
+              {/* Pages & Validation */}
+              <div className="bg-slate-50/50 rounded-xl p-3 flex items-center justify-between border border-slate-100">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500">Páginas:</span>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={act.startPage}
+                      onChange={(e) => updateAct(act.id, 'startPage', parseInt(e.target.value))}
+                      className="w-12 text-center bg-white border border-slate-200 rounded-lg text-sm font-bold py-1 focus:border-esprint-500 outline-none"
+                    />
+                    <span className="text-slate-300">-</span>
+                    <input
+                      type="number"
+                      value={act.endPage}
+                      onChange={(e) => updateAct(act.id, 'endPage', parseInt(e.target.value))}
+                      className="w-12 text-center bg-white border border-slate-200 rounded-lg text-sm font-bold py-1 focus:border-esprint-500 outline-none"
+                    />
+                  </div>
+                </div>
+                {isOverlap && (
+                  <span className="text-xs font-bold text-red-600 flex items-center gap-1 animate-pulse">
+                    <AlertTriangle className="w-3 h-3" /> Error
+                  </span>
+                )}
+              </div>
             </div>
-          );
+          )
         })}
 
         <button onClick={addAct} className="w-full py-12 border-2 border-dashed border-gray-200 rounded-3xl text-gray-400 hover:border-esprint-400 hover:text-esprint-600 hover:bg-esprint-50 transition-all flex flex-col items-center justify-center gap-2 group">
@@ -597,6 +783,6 @@ export const Dashboard: React.FC = () => {
           <span className="text-xs font-bold uppercase tracking-widest">Añadir Acto Manual</span>
         </button>
       </div>
-    </div>
+    </div >
   );
 };

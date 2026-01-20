@@ -1,36 +1,18 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import Tesseract from 'tesseract.js';
 
-// The worker URL from a reliable CDN
-const WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+import pdfWorker from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
-const setupWorker = async () => {
+const setupWorker = () => {
   if (typeof window !== 'undefined') {
-    try {
-      // PDF.js often fails to load cross-origin workers directly in some environments.
-      // We fetch it and create a local Blob URL to bypass strictly enforced SOP on importScripts.
-      const response = await fetch(WORKER_URL);
-      const blob = await response.blob();
-      const localWorkerUrl = URL.createObjectURL(blob);
-      
-      const pdfjs = (pdfjsLib as any);
-      if (pdfjs.GlobalWorkerOptions) {
-        pdfjs.GlobalWorkerOptions.workerSrc = localWorkerUrl;
-      } else if ((window as any).pdfjsLib?.GlobalWorkerOptions) {
-        (window as any).pdfjsLib.GlobalWorkerOptions.workerSrc = localWorkerUrl;
-      }
-    } catch (e) {
-      console.error("Failed to setup PDF.js worker via Blob fallback:", e);
-      // Last resort: try setting the direct URL
-      const pdfjs = (pdfjsLib as any);
-      if (pdfjs.GlobalWorkerOptions) {
-        pdfjs.GlobalWorkerOptions.workerSrc = WORKER_URL;
-      }
+    const pdfjs = (pdfjsLib as any);
+    if (pdfjs.GlobalWorkerOptions) {
+      pdfjs.GlobalWorkerOptions.workerSrc = pdfWorker;
     }
   }
 };
 
-// Initial setup attempt
+// Initial setup
 setupWorker();
 
 export class OCRError extends Error {
@@ -43,30 +25,33 @@ export class OCRError extends Error {
 /**
  * Extracts text from a specific page of a PDF file using OCR with enhanced error handling.
  */
-export const performOCR = async (file: File, pageNumber: number): Promise<string> => {
+// Helper to load the PDF document once
+export const loadPDFForOCR = async (file: File): Promise<any> => {
+  const getDocument = (pdfjsLib as any).getDocument || (window as any).pdfjsLib?.getDocument;
+  if (!getDocument) throw new OCRError("El motor PDF.js no está disponible.");
+
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = getDocument({
+    data: arrayBuffer,
+    cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
+    cMapPacked: true,
+  });
+
+  return await loadingTask.promise;
+};
+
+/**
+ * Extracts text from a specific page using a PRE-LOADED PDF document to avoid reloading the file 600 times.
+ */
+export const performOCR = async (pdfDoc: any, pageNumber: number): Promise<string> => {
   let worker: Tesseract.Worker | null = null;
   try {
-    const getDocument = (pdfjsLib as any).getDocument || (window as any).pdfjsLib?.getDocument;
-    if (!getDocument) {
-      throw new OCRError("El motor PDF.js no está disponible.");
-    }
-
-    const arrayBuffer = await file.arrayBuffer();
-    // We use cMapUrl and standardFontDataUrl to ensure characters are correctly mapped if they use special encodings
-    const loadingTask = getDocument({
-      data: arrayBuffer,
-      cMapUrl: 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/cmaps/',
-      cMapPacked: true,
-    });
-    
-    const pdf = await loadingTask.promise;
-    
-    if (pageNumber < 1 || pageNumber > pdf.numPages) {
+    if (pageNumber < 1 || pageNumber > pdfDoc.numPages) {
       throw new OCRError(`La página ${pageNumber} no existe.`, pageNumber);
     }
 
-    const page = await pdf.getPage(pageNumber);
-    const scale = 2.0; 
+    const page = await pdfDoc.getPage(pageNumber);
+    const scale = 2.0;
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement('canvas');
@@ -84,7 +69,7 @@ export const performOCR = async (file: File, pageNumber: number): Promise<string
     }).promise;
 
     try {
-      // Use standard CDN for Tesseract workers to avoid ESM resolution issues in workers
+      // Use standard CDN for Tesseract workers
       worker = await (Tesseract as any).createWorker('spa', 1, {
         workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/worker.min.js',
         langPath: 'https://tessdata.projectnaptha.com/4.0.0',
@@ -98,11 +83,15 @@ export const performOCR = async (file: File, pageNumber: number): Promise<string
     await worker.terminate();
     worker = null;
 
+    // Help GC
+    canvas.width = 0;
+    canvas.height = 0;
+
     return text;
   } catch (error) {
     if (worker) await worker.terminate();
     if (error instanceof OCRError) throw error;
-    
+
     throw new OCRError(
       `Error en página ${pageNumber}: ${error instanceof Error ? error.message : 'Fallo de procesamiento'}`,
       pageNumber,
