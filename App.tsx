@@ -43,7 +43,7 @@ const App: React.FC = () => {
       <footer className="mt-auto backdrop-blur-sm bg-white/40 border-t border-white/20">
         <div className="mx-auto max-w-7xl px-6 py-8 md:flex md:items-center md:justify-center lg:px-8">
           <p className="text-center text-xs font-medium text-slate-500">
-            &copy; 2024 Esprint Soluciones Tecnológicas. <span className="text-esprint-600">Innovación Legal.</span>
+            &copy; 2026 JG Soluciones Tecnológicas. <span className="text-esprint-600">Innovación Legal.</span>
           </p>
         </div>
       </footer>
