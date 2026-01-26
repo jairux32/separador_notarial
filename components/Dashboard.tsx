@@ -4,7 +4,7 @@ import { Upload, File as FileIcon, Loader2, Plus, Trash2, Wand2, Download, Searc
 import { NotarialAct, ProcessedFile } from '../types';
 import { getPDFPageCount, splitAndZipPDF } from '../services/pdfService';
 // import { analyzeNotarialText, discoverActsInText } from '../services/groqService'; // Removed for local-only mode
-import { performOCR, OCRError, loadPDFForOCR } from '../services/ocrService';
+import { performOCR, OCRError, loadPDFForOCR, initTesseractWorker, terminateTesseractWorker, extractTextLayer } from '../services/ocrService';
 import * as pdfjsLib from 'pdfjs-dist';
 import clsx from 'clsx';
 
@@ -271,71 +271,99 @@ export const Dashboard: React.FC = () => {
     if (!currentFile || !pdfDocumentRef.current) return;
     setIsScanning(true);
     setOcrErrors([]);
+    let worker: any = null;
+
     try {
-      let combinedText = "";
+      // 1. Initialize Worker Pool (Once)
+      worker = await initTesseractWorker();
+
       const totalPages = currentFile.pageCount;
       const pagesArray = Array.from({ length: totalPages }, (_, i) => i + 1);
-      const CHUNK_SIZE = 5;
 
+      // BATCH SIZE: Process 4 pages in parallel (Optimal for most CPUs)
+      const CHUNK_SIZE = 4;
       let allFoundCodes: Set<string> = new Set();
       let candidates: { code: string, page: number }[] = [];
 
       for (let i = 0; i < pagesArray.length; i += CHUNK_SIZE) {
         const chunk = pagesArray.slice(i, i + CHUNK_SIZE);
-        await new Promise(resolve => setTimeout(resolve, 50));
 
-        for (const p of chunk) {
-          setProgress(Math.round(((i + 1) / totalPages) * 100));
-
+        // 2. Parallel Processing
+        const chunkResults = await Promise.all(chunk.map(async (p) => {
           try {
-            // PASS THE REF, NOT THE FILE
-            const text = await performOCR(pdfDocumentRef.current, p);
-            const cleaned = cleanOcrText(text);
+            // A. Try Native Text (Fastest)
+            let text = await extractTextLayer(pdfDocumentRef.current, p);
 
-            const codesOnPage = findCodesLocally(cleaned);
+            // B. Fallback to OCR (Reusing worker)
+            if (!text || text.length < 50) {
+              text = await performOCR(pdfDocumentRef.current, p, worker);
+            }
 
-            codesOnPage.forEach(code => {
-              if (!allFoundCodes.has(code)) {
-                allFoundCodes.add(code);
-                candidates.push({ code, page: p });
-              }
-            });
-
-          } catch (ocrErr) {
-            const msg = ocrErr instanceof OCRError ? ocrErr.message : "Error OCR.";
-            setOcrErrors(prev => [...prev, { page: p, message: msg }]);
+            return { page: p, text, error: null };
+          } catch (e) {
+            return { page: p, text: "", error: e };
           }
+        }));
+
+        // 3. Process Results
+        for (const res of chunkResults) {
+          if (res.error) {
+            setOcrErrors(prev => [...prev, { page: res.page, message: "Error de lectura", retrying: false }]);
+            continue;
+          }
+
+          const cleaned = cleanOcrText(res.text);
+          const codesOnPage = findCodesLocally(cleaned);
+
+          codesOnPage.forEach(code => {
+            if (!allFoundCodes.has(code)) {
+              allFoundCodes.add(code);
+              candidates.push({ code, page: res.page });
+            }
+          });
+        }
+
+        // Update Progress
+        setProgress(Math.round(((i + chunk.length) / totalPages) * 100));
+        await new Promise(resolve => setTimeout(resolve, 10)); // UI Breath
+      }
+
+      // 4. Merge Candidates
+      if (candidates.length === 0) {
+        alert("No se encontraron códigos. Intente cambiar el Año/Tipo o revise el PDF.");
+      } else {
+        const newActs = candidates.map(c => ({
+          id: crypto.randomUUID(),
+          startPage: c.page,
+          endPage: Math.min(c.page + 5, currentFile.pageCount),
+          code: c.code,
+          description: "Acto Detectado Automáticamente",
+          grantors: "",
+          actDate: "",
+          suggestedByAI: true
+        })).sort((a, b) => a.startPage - b.startPage);
+
+        // Smart Range Adjustment
+        for (let i = 0; i < newActs.length - 1; i++) {
+          newActs[i].endPage = newActs[i + 1].startPage - 1;
+        }
+
+        const currentCodes = currentFile.acts.map(a => a.code);
+        const filteredNewActs = newActs.filter(a => !currentCodes.includes(a.code));
+
+        if (filteredNewActs.length > 0) {
+          setCurrentFile(prev => prev ? { ...prev, acts: [...prev.acts, ...filteredNewActs].sort((a, b) => a.startPage - b.startPage) } : null);
+        } else {
+          alert("Se encontraron códigos, pero ya existen en la lista.");
         }
       }
 
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => a.page - b.page);
-
-        const discoveredActs = candidates.map((c, i) => {
-          const nextPage = candidates[i + 1]?.page || totalPages + 1;
-          const endPage = Math.max(c.page, nextPage - 1);
-
-          return {
-            id: crypto.randomUUID(),
-            startPage: c.page,
-            endPage: Math.min(endPage, totalPages),
-            code: c.code,
-            description: "Acto Detectado (Local)",
-            grantors: "",
-            actDate: "",
-            suggestedByAI: false
-          };
-        });
-
-        setCurrentFile({ ...currentFile, acts: discoveredActs });
-      } else {
-        alert("No se identificaron códigos. Intente cambiar el Año/Tipo o revise el PDF.");
-      }
-
     } catch (e) {
-      console.error("Discovery failed:", e);
-      alert("Error crítico durante el escaneo local.");
+      console.error(e);
+      setError("Error durante el escaneo inteligente.");
     } finally {
+      // 5. Cleanup Worker
+      if (worker) await terminateTesseractWorker(worker);
       setIsScanning(false);
       setProgress(0);
     }
@@ -346,7 +374,7 @@ export const Dashboard: React.FC = () => {
     setOcrErrors(prev => prev.map(err => err.page === page ? { ...err, retrying: true } : err));
 
     try {
-      const text = await performOCR(pdfDocumentRef.current, page);
+      const text = await performOCR(pdfDocumentRef.current, page, null);
       const cleaned = cleanOcrText(text);
       const newCombinedText = fullCleanedText + `\n--- FOJA ${page} (Retry) ---\n${cleaned}`;
       setFullCleanedText(newCombinedText);

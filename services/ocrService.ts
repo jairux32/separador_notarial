@@ -23,9 +23,30 @@ export class OCRError extends Error {
 }
 
 /**
- * Extracts text from a specific page of a PDF file using OCR with enhanced error handling.
+ * Initializes a Tesseract worker to be reused.
  */
-// Helper to load the PDF document once
+export const initTesseractWorker = async (): Promise<Tesseract.Worker> => {
+  try {
+    const worker = await (Tesseract as any).createWorker('spa', 1);
+    return worker;
+  } catch (e) {
+    console.error("Failed to init worker", e);
+    throw new OCRError("No se pudo iniciar el motor OCR (Tesseract).");
+  }
+};
+
+/**
+ * Terminates a Tesseract worker.
+ */
+export const terminateTesseractWorker = async (worker: Tesseract.Worker | null) => {
+  if (worker) {
+    await worker.terminate();
+  }
+};
+
+/**
+ * Helper to load the PDF document once
+ */
 export const loadPDFForOCR = async (file: File): Promise<any> => {
   const getDocument = (pdfjsLib as any).getDocument || (window as any).pdfjsLib?.getDocument;
   if (!getDocument) throw new OCRError("El motor PDF.js no está disponible.");
@@ -41,17 +62,48 @@ export const loadPDFForOCR = async (file: File): Promise<any> => {
 };
 
 /**
- * Extracts text from a specific page using a PRE-LOADED PDF document to avoid reloading the file 600 times.
+ * Attempts to extract text directly from the PDF text layer (fastest).
  */
-export const performOCR = async (pdfDoc: any, pageNumber: number): Promise<string> => {
-  let worker: Tesseract.Worker | null = null;
+export const extractTextLayer = async (pdfDoc: any, pageNumber: number): Promise<string | null> => {
+  try {
+    const page = await pdfDoc.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const textItems = textContent.items.map((item: any) => item.str).join(' ');
+
+    // Simple heuristic: if we got > 50 chars, assume it's good text
+    if (textItems.length > 50) {
+      return textItems;
+    }
+    return null;
+  } catch (e) {
+    return null; // Fallback to OCR
+  }
+}
+
+/**
+ * Performs OCR on a specific page, reusing an existing worker and cropping top 30%.
+ */
+export const performOCR = async (
+  pdfDoc: any,
+  pageNumber: number,
+  worker: Tesseract.Worker | null
+): Promise<string> => {
+  let localWorker = false;
+
   try {
     if (pageNumber < 1 || pageNumber > pdfDoc.numPages) {
       throw new OCRError(`La página ${pageNumber} no existe.`, pageNumber);
     }
 
+    // Lazy init if no worker provided (fallback)
+    if (!worker) {
+      worker = await initTesseractWorker();
+      localWorker = true;
+    }
+
     const page = await pdfDoc.getPage(pageNumber);
-    const scale = 2.0;
+    // Reduced scale for speed (1.5 is usually enough for Act Codes)
+    const scale = 1.5;
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement('canvas');
@@ -60,28 +112,26 @@ export const performOCR = async (pdfDoc: any, pageNumber: number): Promise<strin
       throw new OCRError("Error de memoria en el navegador.", pageNumber);
     }
 
-    canvas.height = viewport.height;
+    // CROPPING: Use only top 30% of the page
+    const CROP_PERCENT = 0.30;
     canvas.width = viewport.width;
+    canvas.height = viewport.height * CROP_PERCENT;
 
+    // Render only the top part to the canvas
     await page.render({
       canvasContext: context,
       viewport: viewport,
+      transform: [1, 0, 0, 1, 0, 0], // Default transform
+      background: 'white'
     }).promise;
 
-    try {
-      // Use standard CDN for Tesseract workers
-      worker = await (Tesseract as any).createWorker('spa', 1, {
-        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.0.5/dist/worker.min.js',
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.0.0/tesseract-core.wasm.js',
-      });
-    } catch (workerErr) {
-      throw new OCRError("No se pudo inicializar Tesseract.", pageNumber, workerErr);
-    }
-
+    // Recognize
     const { data: { text } } = await worker.recognize(canvas);
-    await worker.terminate();
-    worker = null;
+
+    // Clean up local worker if we created it
+    if (localWorker) {
+      await worker.terminate();
+    }
 
     // Help GC
     canvas.width = 0;
@@ -89,7 +139,7 @@ export const performOCR = async (pdfDoc: any, pageNumber: number): Promise<strin
 
     return text;
   } catch (error) {
-    if (worker) await worker.terminate();
+    if (localWorker && worker) await worker.terminate();
     if (error instanceof OCRError) throw error;
 
     throw new OCRError(
