@@ -18,7 +18,12 @@ Esta herramienta permite cargar libros completos (incluso archivos de +600MB), i
 - Todo el análisis OCR y manipulación de PDFs se realiza en el navegador del usuario.
 - **Ningún documento se sube a la nube.** Garantía absoluta de confidencialidad para la información notarial sensible.
 
-### 🎨 Experiencia de Usuario "Digital Notary Glass"
+### � Arquitectura Cliente-Servidor (Sincronización Total)
+- Los usuarios se sincronizan automáticamente entre todas las máquinas de la red.
+- Base de datos centralizada en **PostgreSQL**.
+- Backend robusto en **Node.js/Express** para gestión de seguridad y persistencia.
+
+### �🎨 Experiencia de Usuario "Digital Notary Glass"
 - Interfaz moderna con diseño **Glassmorphism** (efectos de vidrio, desenfoques).
 - Animaciones fluidas y feedback visual intuitivo.
 - Modo oscuro/gradiente elegante "Violet/Indigo".
@@ -34,33 +39,32 @@ Esta herramienta permite cargar libros completos (incluso archivos de +600MB), i
 
 ## 🛠️ Tecnologías
 
-- **Core:** React + Vite + TypeScript
-- **Estilos:** Tailwind CSS (con animaciones personalizadas)
+- **Frontend:** React + Vite + TypeScript (UI Moderna)
+- **Backend:** Node.js + Express (API Centralizada)
+- **Base de Datos:** PostgreSQL (Persistencia de datos)
+- **Containerización:** Docker & Docker Compose (Despliegue fácil)
+- **OCR Engine:** Tesseract.js (Análisis local)
 - **PDF Engine:** `pdf-lib` & `pdfjs-dist`
-- **OCR:** Tesseract.js (versión optimizada para números y códigos)
 
-## 📦 Instalación y Uso
+## 📦 Despliegue en Producción (Docker)
 
-1. **Clonar el repositorio:**
-   ```bash
-   git clone https://github.com/jairux32/separador_notarial.git
-   cd separador_notarial
-   ```
+El sistema está configurado para ejecutarse mediante Docker, lo que garantiza que funcione igual en cualquier máquina.
 
-2. **Instalar dependencias:**
-   ```bash
-   npm install
-   ```
+1.  **Clonar el repositorio:**
+    ```bash
+    git clone https://github.com/jairux32/separador_notarial.git
+    cd separador_notarial
+    ```
 
-3. **Ejecutar en desarrollo:**
-   ```bash
-   npm run dev
-   ```
+2.  **Iniciar el sistema:**
+    ```bash
+    docker-compose up -d --build
+    ```
 
-4. **Construir para producción:**
-   ```bash
-   npm run build
-   ```
+3.  **Acceso:**
+    - La aplicación estará disponible en: `http://localhost:8080` (o la IP del servidor en la red).
+    - El backend (API) corre internamente pero es accesible en el puerto `3002` si es necesario.
+    - La base de datos corre en el puerto `5433`.
 
 ## 📋 Normativa
 

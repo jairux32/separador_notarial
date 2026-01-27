@@ -27,7 +27,12 @@ export class OCRError extends Error {
  */
 export const initTesseractWorker = async (): Promise<Tesseract.Worker> => {
   try {
-    const worker = await (Tesseract as any).createWorker('spa', 1);
+    const worker = await (Tesseract as any).createWorker('spa', 1, {
+      workerPath: '/tesseract/worker.min.js',
+      corePath: '/tesseract/tesseract-core.wasm.js',
+      langPath: '/tesseract',
+      cacheMethod: 'none', // Force local use
+    });
     return worker;
   } catch (e) {
     console.error("Failed to init worker", e);

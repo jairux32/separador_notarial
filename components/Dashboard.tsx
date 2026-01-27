@@ -1,10 +1,14 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
-import { Upload, File as FileIcon, Loader2, Plus, Trash2, Wand2, Download, Search, FileDigit, AlertCircle, AlertTriangle, Eye, EyeOff, Info, Calendar, Scan, Sparkles, RefreshCw, X, ChevronLeft, ChevronRight, Maximize2, CheckCircle2 } from 'lucide-react';
+import { Upload, File as FileIcon, Loader2, Plus, Trash2, Wand2, Download, Search, FileDigit, AlertCircle, AlertTriangle, Eye, EyeOff, Info, Calendar, Scan, Sparkles, RefreshCw, X, ChevronLeft, ChevronRight, Maximize2, CheckCircle2, Settings, User as UserIcon } from 'lucide-react';
 import { NotarialAct, ProcessedFile } from '../types';
 import { getPDFPageCount, splitAndZipPDF } from '../services/pdfService';
 // import { analyzeNotarialText, discoverActsInText } from '../services/groqService'; // Removed for local-only mode
 import { performOCR, OCRError, loadPDFForOCR, initTesseractWorker, terminateTesseractWorker, extractTextLayer } from '../services/ocrService';
+import { saveState, loadState, loadSettings, defaultSettings, AppSettings } from '../services/persistenceService';
+import { ConfigPanel } from './ConfigPanel';
+// import { UserManagement } from './UserManagement'; // Removed, lifted to App
+import { useAuth } from './AuthContext';
 import * as pdfjsLib from 'pdfjs-dist';
 import clsx from 'clsx';
 
@@ -118,8 +122,21 @@ const PreviewModal: React.FC<{
   );
 };
 
+// Queue Interface
+interface QueueItem {
+  id: string;
+  file: File;
+  status: 'pending' | 'processing' | 'completed' | 'error';
+  name: string;
+}
+
 export const Dashboard: React.FC = () => {
   const [currentFile, setCurrentFile] = useState<ProcessedFile | null>(null);
+
+  // Queue State
+  const [fileQueue, setFileQueue] = useState<QueueItem[]>([]);
+  const [completedFiles, setCompletedFiles] = useState<ProcessedFile[]>([]);
+
   const [isDragging, setIsDragging] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -140,6 +157,94 @@ export const Dashboard: React.FC = () => {
     { value: "A", label: "A - ARRIENDOS" }
   ];
 
+  // Settings State
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [isConfigOpen, setIsConfigOpen] = useState(false);
+  const { user } = useAuth();
+
+
+  // --- PERSISTENCE HOOKS ---
+  useEffect(() => {
+    // Load saved state (Files + Settings)
+    loadState().then(saved => {
+      // Logic adapted for single file persistence for now. 
+      // Todo: Upgrade persistence to support lists.
+      if (saved) {
+        console.log("Restoring session...");
+        setCurrentFile(saved);
+        if ((saved as any).missingFile) {
+          setError("Sesión restaurada. El archivo PDF es muy grande para guardarse, por favor vuelva a cargarlo.");
+        }
+      }
+    });
+
+    loadSettings().then(savedSettings => {
+      setSettings(savedSettings);
+    });
+  }, []);
+
+  useEffect(() => {
+    // Auto-save logic (Debounce 1s)
+    const timer = setTimeout(() => {
+      saveState(currentFile);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [currentFile]);
+
+
+  // --- QUEUE MANAGEMENT ---
+
+  // 1. Queue Processor Effect
+  useEffect(() => {
+    if (isProcessing || isScanning || !fileQueue.length) return;
+
+    const nextItem = fileQueue.find(i => i.status === 'pending');
+    if (nextItem) {
+      // Start processing next item
+      processQueueItem(nextItem);
+    }
+  }, [fileQueue, isProcessing, isScanning]);
+
+  const processQueueItem = async (item: QueueItem) => {
+    try {
+      // Update status to processing
+      setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'processing' } : i));
+
+      // Load and Process
+      await processFile(item.file);
+
+      // Note: processFile sets currentFile. 
+      // We need to trigger auto-scan immediately after load if it's part of a queue batch?
+      // Yes, "Batch Processing" implies auto-scan. 
+      // But processFile is async. Once it returns, currentFile is SET but maybe not ready in state immediately?
+      // Actually processFile awaits access to file.
+
+      setTimeout(() => {
+        autoDiscoverActs(item.id); // Validating ID to ensure we track the right item
+      }, 500);
+
+    } catch (e) {
+      setFileQueue(prev => prev.map(i => i.id === item.id ? { ...i, status: 'error' } : i));
+    }
+  };
+
+  // Helper to finish processing and move to completed
+  const completeCurrentJob = (queueItemId: string) => {
+    setCurrentFile(prev => {
+      if (prev) {
+        setCompletedFiles(completed => [...completed, prev]);
+        setFileQueue(q => q.map(i => i.id === queueItemId ? { ...i, status: 'completed' } : i));
+        // Optional: Don't clear currentFile so user sees the last one? 
+        // Or clear it to allow next one to show? 
+        // If we leave it, the next processQueueItem will overwrite it.
+        return prev;
+      }
+      return prev;
+    });
+  };
+
+  // --------------------------
+
   const validateActCode = (code: string) => {
     if (!code) return true;
     return /^\d{4}\d{7}[P|D|O|A]\d{5}$/i.test(code);
@@ -153,42 +258,44 @@ export const Dashboard: React.FC = () => {
       .trim();
   };
 
+  // Helper to generate flexible regex from a code (e.g. 1101-> [1I][1I][0O][1I])
+  const generateFlexiblePattern = (code: string) => {
+    return code.split('').map(char => {
+      if (char === '0') return '[0|O|o|D|Q]';
+      if (char === '1') return '[1|I|l|!|\\|]';
+      if (char === '2') return '[2|Z]';
+      if (char === '7') return '[7|T]';
+      if (char === '8') return '[8|B]';
+      return char;
+    }).join('');
+  };
+
   // Lógica de Reconocimiento Local Avanzada (Sin IA)
   // Lógica de Reconocimiento Local Avanzada (Guiada por Usuario)
   const findCodesLocally = (text: string) => {
-    // Matriz de confusión para el año seleccionado
-    const yearPattern = selectedYear.split('').map(d => {
-      if (d === '0') return '[0|O|o|D|Q]';
-      if (d === '1') return '[1|I|l|!]';
-      if (d === '2') return '[2|Z]';
-      if (d === '8') return '[8|B]';
-      return d;
-    }).join('');
+    // 1. Year Pattern
+    const yearPattern = generateFlexiblePattern(selectedYear);
 
-    // Matriz de confusión para el código notarial constante: 1101007
-    // 1->[1|I|l|!|\|], 0->[0|O|o|D|Q], 7->[7|T]
-    // Patrón flexible para 1101007:
-    const notaryPattern = `[1Il!|][1Il!|][0OoDQ][1Il!|][0OoDQ][0OoDQ][7T]`;
+    // 2. Notary Pattern (From Settings)
+    const notaryPattern = generateFlexiblePattern(settings.notaryCode);
 
-    // Matriz de confusión para la letra seleccionada
+    // 3. Type Pattern
     const charMap: Record<string, string> = {
       'P': '[P]', 'D': '[D|0|O]', 'O': '[O|0|D]', 'C': '[C|G]', 'A': '[A|4]'
     };
     const typePattern = charMap[selectedType] || `[${selectedType}]`;
 
-    // Regex Dinámico: Año(Selected) - Notaria(Fixed 1101007) - Letra(Selected) - Secuencia(5d)
+    // Regex Dinámico: Año - Notaria(Config) - Letra - Secuencia(5d)
     const regexStr = `(${yearPattern})\\s*(${notaryPattern})\\s*(${typePattern})\\s*([0-9OQZDBIil|!]{5})`;
 
-    // Fallback: Si no encuentra el patrón estricto 1101007, busca genérico para no romper todo
-    // Pero el usuario dijo "siempre va ser 1101007", así que priorizamos esto.
     const regex = new RegExp(regexStr, 'gi');
 
     const matches = [...text.matchAll(regex)];
     return matches.map(m => {
       const year = selectedYear;
 
-      // Forzamos la constante 1101007 ya que el usuario indicó que es fija
-      const notary = "1101007";
+      // Use configured notary code
+      const notary = settings.notaryCode;
 
       const letter = selectedType;
 
@@ -211,7 +318,15 @@ export const Dashboard: React.FC = () => {
   const hasInvalidCodes = useMemo(() => currentFile?.acts.some(act => act.code && !validateActCode(act.code)), [currentFile]);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.[0]) await processFile(e.target.files[0]);
+    if (e.target.files && e.target.files.length > 0) {
+      const newItems: QueueItem[] = Array.from(e.target.files).map((f: any) => ({
+        id: crypto.randomUUID(),
+        file: f,
+        name: f.name,
+        status: 'pending'
+      }));
+      setFileQueue(prev => [...prev, ...newItems]);
+    }
   };
 
   /* PDF Processing State */
@@ -235,18 +350,7 @@ export const Dashboard: React.FC = () => {
         // cleanup? pdfjs docs usually just garbage collect, but we can reset
         pdfDocumentRef.current = null;
       }
-      // Assuming performOCR needs the doc, we need to load it.
-      // But we can't import loadPDFForOCR easily if I don't see imports. 
-      // I will add the import in a separate step or assume I can modify it.
-      // Ideally I should have checked imports first.
 
-      // Since I am modifying the function body, I will rely on the fact that I will add the import next.
-      // For now, let's keep the logic sound.
-
-      // We will perform the load inside autoDiscover acts? No, better here to fail fast if file is bad.
-      // However, to keep it simple with existing imports, I need to make sure `loadPDFForOCR` is available.
-
-      // Let's assume I will fix imports.
       const loadedDoc = await loadPDFForOCR(file);
       pdfDocumentRef.current = loadedDoc;
       const pages = loadedDoc.numPages; // Use the count from the loaded doc directly! Faster than getPDFPageCount
@@ -262,13 +366,21 @@ export const Dashboard: React.FC = () => {
     } catch (err) {
       console.error(err);
       setError("Error al cargar el PDF. El archivo podría estar dañado o bloqueado.");
+      // Throw so queue knows it failed
+      throw err;
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const autoDiscoverActs = async () => {
-    if (!currentFile || !pdfDocumentRef.current) return;
+  // Modified AutoDiscover to support Queue Callback
+  const autoDiscoverActs = async (queueItemId?: string) => {
+    // Use ref to access current doc directly, currentFile might be stale
+    if (!pdfDocumentRef.current) return;
+
+    // We need currentFile wrapper mainly for name and metadata. 
+    // If called via Queue, we assume processFile just finished.
+
     setIsScanning(true);
     setOcrErrors([]);
     let worker: any = null;
@@ -277,7 +389,7 @@ export const Dashboard: React.FC = () => {
       // 1. Initialize Worker Pool (Once)
       worker = await initTesseractWorker();
 
-      const totalPages = currentFile.pageCount;
+      const totalPages = pdfDocumentRef.current.numPages; // Use ref source of truth
       const pagesArray = Array.from({ length: totalPages }, (_, i) => i + 1);
 
       // BATCH SIZE: Process 4 pages in parallel (Optimal for most CPUs)
@@ -330,12 +442,12 @@ export const Dashboard: React.FC = () => {
 
       // 4. Merge Candidates
       if (candidates.length === 0) {
-        alert("No se encontraron códigos. Intente cambiar el Año/Tipo o revise el PDF.");
+        if (!queueItemId) alert("No se encontraron códigos. Intente cambiar el Año/Tipo o revise el PDF.");
       } else {
         const newActs = candidates.map(c => ({
           id: crypto.randomUUID(),
           startPage: c.page,
-          endPage: Math.min(c.page + 5, currentFile.pageCount),
+          endPage: Math.min(c.page + 5, totalPages),
           code: c.code,
           description: "Acto Detectado Automáticamente",
           grantors: "",
@@ -348,19 +460,32 @@ export const Dashboard: React.FC = () => {
           newActs[i].endPage = newActs[i + 1].startPage - 1;
         }
 
-        const currentCodes = currentFile.acts.map(a => a.code);
-        const filteredNewActs = newActs.filter(a => !currentCodes.includes(a.code));
+        // We assume we are updating the current active file
+        setCurrentFile(prev => {
+          if (!prev) return null;
+          const currentCodes = prev.acts.map(a => a.code);
+          const filteredNewActs = newActs.filter(a => !currentCodes.includes(a.code));
 
-        if (filteredNewActs.length > 0) {
-          setCurrentFile(prev => prev ? { ...prev, acts: [...prev.acts, ...filteredNewActs].sort((a, b) => a.startPage - b.startPage) } : null);
-        } else {
-          alert("Se encontraron códigos, pero ya existen en la lista.");
-        }
+          if (filteredNewActs.length === 0) {
+            if (!queueItemId) alert("No se encontraron códigos nuevos.");
+            return prev;
+          }
+
+          return { ...prev, acts: [...prev.acts, ...filteredNewActs].sort((a, b) => a.startPage - b.startPage) };
+        });
+      }
+
+      // 5. Completion Callback for Queue
+      if (queueItemId) {
+        completeCurrentJob(queueItemId);
       }
 
     } catch (e) {
       console.error(e);
       setError("Error durante el escaneo inteligente.");
+      if (queueItemId) {
+        setFileQueue(q => q.map(i => i.id === queueItemId ? { ...i, status: 'error' } : i));
+      }
     } finally {
       // 5. Cleanup Worker
       if (worker) await terminateTesseractWorker(worker);
@@ -528,7 +653,19 @@ export const Dashboard: React.FC = () => {
           )}
           onDragOver={(e) => { e.preventDefault(); if (!isProcessing) setIsDragging(true); }}
           onDragLeave={() => setIsDragging(false)}
-          onDrop={async (e) => { e.preventDefault(); setIsDragging(false); if (!isProcessing && e.dataTransfer.files[0]) await processFile(e.dataTransfer.files[0]); }}
+          onDrop={async (e) => {
+            e.preventDefault();
+            setIsDragging(false);
+            if (!isProcessing && e.dataTransfer.files.length > 0) {
+              const newItems: QueueItem[] = Array.from(e.dataTransfer.files).map((f: any) => ({
+                id: crypto.randomUUID(),
+                file: f,
+                name: f.name,
+                status: 'pending'
+              }));
+              setFileQueue(prev => [...prev, ...newItems]);
+            }
+          }}
         >
           {isProcessing ? (
             <div className="flex flex-col items-center gap-6">
@@ -537,8 +674,10 @@ export const Dashboard: React.FC = () => {
                 <Loader2 className="relative w-20 h-20 text-esprint-600 animate-spin" />
               </div>
               <div className="text-center">
-                <h2 className="text-2xl font-bold text-slate-800 mb-2">Procesando Documento...</h2>
-                <p className="text-slate-500 font-medium">Analizando estructura y cargando en memoria segura.</p>
+                <h2 className="text-2xl font-bold text-slate-800 mb-2">Procesando {currentFile?.name}...</h2>
+                <p className="text-slate-500 font-medium">
+                  {fileQueue.filter(i => i.status === 'pending').length} archivos pendientes en cola.
+                </p>
               </div>
             </div>
           ) : (
@@ -546,21 +685,66 @@ export const Dashboard: React.FC = () => {
               <div className="bg-gradient-to-br from-esprint-100 to-white p-8 rounded-full mb-8 shadow-xl shadow-esprint-100 group-hover:scale-110 transition-transform duration-300">
                 <Upload className="w-16 h-16 text-esprint-600" />
               </div>
-              <h2 className="text-3xl font-extrabold text-slate-800 mb-3 text-center">Cargar Libro Notarial</h2>
+              <h2 className="text-3xl font-extrabold text-slate-800 mb-3 text-center">Cargar Libros Notariales</h2>
               <p className="text-slate-500 mb-10 text-center max-w-md text-lg">
-                Arrastre su PDF aquí o presione el botón para comenzar el análisis local.
+                Arrastre uno o múltiples PDFs aquí para procesarlos en lote.
               </p>
 
               <label className="relative cursor-pointer group overflow-hidden bg-gradient-to-r from-esprint-600 to-esprint-500 text-white px-10 py-4 rounded-2xl font-bold shadow-lg shadow-esprint-500/30 hover:shadow-esprint-500/50 hover:-translate-y-1 transition-all">
                 <span className="relative z-10 flex items-center gap-2">
-                  <FileIcon className="w-5 h-5" /> Seleccionar Archivo
+                  <FileIcon className="w-5 h-5" /> Seleccionar Archivos
                 </span>
                 <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300"></div>
-                <input type="file" className="sr-only" onChange={handleFileSelect} disabled={isProcessing} />
+                <input type="file" className="sr-only" onChange={handleFileSelect} disabled={isProcessing} multiple />
               </label>
             </>
           )}
         </div>
+
+        {/* Queue List UI (Only if queue exists or completed items exist) */}
+        {(fileQueue.length > 0 || completedFiles.length > 0) && !currentFile && (
+          <div className="mt-8 max-w-2xl mx-auto">
+            <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+              <FileDigit className="w-5 h-5" /> Cola de Procesamiento
+            </h3>
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden divide-y divide-slate-100">
+              {/* Completed Items */}
+              {completedFiles.map((f, idx) => (
+                <div key={f.id} className="p-4 flex items-center justify-between bg-emerald-50/50">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                    <div>
+                      <p className="font-bold text-slate-700">{f.name}</p>
+                      <p className="text-xs text-emerald-600 font-bold">{f.acts.length} actos detectados</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setCurrentFile(f)} className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-xs font-bold rounded-lg hover:bg-slate-50">
+                    Revisar
+                  </button>
+                </div>
+              ))}
+
+              {/* Pending/Processing Items (From Queue) */}
+              {fileQueue.map((item, idx) => (
+                (item.status !== 'completed') && (
+                  <div key={item.id} className="p-4 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      {item.status === 'processing' ? <Loader2 className="w-5 h-5 text-esprint-500 animate-spin" />
+                        : item.status === 'error' ? <AlertCircle className="w-5 h-5 text-red-500" />
+                          : <div className="w-5 h-5 rounded-full border-2 border-slate-200" />}
+
+                      <div className="opacity-80">
+                        <p className="font-medium text-slate-700">{item.name}</p>
+                        <p className="text-xs text-slate-400 capitalize">{item.status === 'pending' ? 'Pendiente' : item.status}</p>
+                      </div>
+                    </div>
+                  </div>
+                )
+              ))}
+            </div>
+          </div>
+        )}
+
         {error && (
           <div className="mt-6 flex justify-center animate-fade-in-up">
             <div className="bg-red-50 border border-red-200 text-red-600 px-6 py-3 rounded-2xl font-bold flex items-center gap-3 shadow-sm">
@@ -569,6 +753,12 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
         )}
+        <ConfigPanel
+          isOpen={isConfigOpen}
+          onClose={() => setIsConfigOpen(false)}
+          currentSettings={settings}
+          onSave={(newSettings) => setSettings(newSettings)}
+        />
       </div>
     );
   }
@@ -608,7 +798,16 @@ export const Dashboard: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex gap-3">
+        <div className="flex items-center gap-3">
+          {user?.role === 'admin' && (
+            <button
+              onClick={() => setIsConfigOpen(true)}
+              className="p-3 bg-white hover:bg-esprint-50 text-slate-500 hover:text-esprint-600 rounded-xl border border-slate-200 shadow-sm transition-colors"
+              title="Configuración"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+          )}
           <button
             onClick={autoDiscoverActs}
             disabled={isScanning || isProcessing}
@@ -811,6 +1010,12 @@ export const Dashboard: React.FC = () => {
           <span className="text-xs font-bold uppercase tracking-widest">Añadir Acto Manual</span>
         </button>
       </div>
+      <ConfigPanel
+        isOpen={isConfigOpen}
+        onClose={() => setIsConfigOpen(false)}
+        currentSettings={settings}
+        onSave={(newSettings) => setSettings(newSettings)}
+      />
     </div >
   );
 };

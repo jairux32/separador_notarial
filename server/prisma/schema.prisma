@@ -1,0 +1,27 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  name      String
+  role      String   // 'admin' | 'operator'
+  createdAt DateTime @default(now())
+}
+
+model ProcessedFile {
+  id         String   @id @default(uuid())
+  filename   String
+  pageCount  Int
+  status     String
+  userId     String?
+  createdAt  DateTime @default(now())
+}
